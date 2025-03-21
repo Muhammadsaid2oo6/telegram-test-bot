@@ -649,21 +649,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     """Start the bot."""
-    # Create the Application and pass it your bot's token
-    application = Application.builder().token(token).build()
+    try:
+        # Create the Application and pass it your bot's token
+        application = Application.builder().token(token).build()
 
-    # Add handlers
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("testlarim", testlarim_command))
-    application.add_handler(CommandHandler("students", students_command))
-    application.add_handler(CommandHandler("scores", scores_command))
-    application.add_handler(CommandHandler("edit", edit_command))
-    application.add_handler(CommandHandler("info", info_command))
-    application.add_handler(CallbackQueryHandler(button_callback))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        # Add handlers
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CommandHandler("testlarim", testlarim_command))
+        application.add_handler(CommandHandler("students", students_command))
+        application.add_handler(CommandHandler("scores", scores_command))
+        application.add_handler(CommandHandler("edit", edit_command))
+        application.add_handler(CommandHandler("info", info_command))
+        application.add_handler(CallbackQueryHandler(button_callback))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Setup commands
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+        # Setup commands
+        application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    except Exception as e:
+        logger.error(f"Error running bot: {e}")
+        raise e
 
 if __name__ == "__main__":
     main() 

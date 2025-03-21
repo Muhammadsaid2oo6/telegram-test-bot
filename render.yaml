@@ -1,0 +1,11 @@
+services:
+  - type: worker
+    name: telegram-test-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        value: 7607065312:AAF7l-X6Pb5FsCSHlx5SgQgMFh2ymbT9b7I
+      - key: ADMIN_ID
+        value: 1451340359 
