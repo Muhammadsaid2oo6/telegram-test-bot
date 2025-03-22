@@ -5,9 +5,9 @@ After=network.target
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/home/ubuntu/tg_bot/tg_bot
-Environment=PYTHONPATH=/home/ubuntu/tg_bot/tg_bot/venv/bin
-ExecStart=/home/ubuntu/tg_bot/tg_bot/venv/bin/python3 bot.py
+WorkingDirectory=/home/ubuntu/tg_bot
+Environment=PYTHONPATH=/home/ubuntu/tg_bot
+ExecStart=/home/ubuntu/tg_bot/venv/bin/python3 bot.py
 Restart=always
 RestartSec=5
 
