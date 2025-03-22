@@ -1,0 +1,24 @@
+{
+  "5813334357": {
+    "user_id": 5813334357,
+    "full_name": "asad asadov",
+    "test_results": {
+      "001": {
+        "score": 80.0,
+        "date": "2025-03-22T05:57:34.993072"
+      }
+    },
+    "registration_date": "2025-03-22T05:57:20.011796"
+  },
+  "5494277898": {
+    "user_id": 5494277898,
+    "full_name": "Javohir Tayirov",
+    "test_results": {
+      "001": {
+        "score": 60.0,
+        "date": "2025-03-22T06:00:30.464904"
+      }
+    },
+    "registration_date": "2025-03-22T06:00:20.280497"
+  }
+}

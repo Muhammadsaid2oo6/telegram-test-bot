@@ -1,10 +1,12 @@
 import os
 import logging
+import json
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScope
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 from dotenv import load_dotenv
 import re
 from datetime import datetime
+import asyncio
 
 # Load environment variables
 load_dotenv(override=True)  # Force reload of environment variables
@@ -15,9 +17,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Data storage files
+TESTS_FILE = "data/tests.json"
+STUDENTS_FILE = "data/students.json"
+
+# Create data directory if it doesn't exist
+os.makedirs("data", exist_ok=True)
+
 # Store tests temporarily (in production, use a database)
 tests = {}
-open_tests = {}
 user_names = {}
 students = {}  # Store student information
 ADMIN_IDS = [int(os.getenv("ADMIN_ID", "0"))]  # List of admin IDs
@@ -34,21 +42,116 @@ class Student:
         self.test_results = {}  # {test_code: {score: float, date: datetime}}
         self.registration_date = datetime.now()
 
-class Test:
-    def __init__(self, code, creator_id):
-        self.code = code
-        self.creator_id = creator_id
-        self.attempts = {}  # user_id: number_of_attempts
-        self.is_scored = False
-        self.max_score = 100
-        self.date_created = datetime.now()
+    def to_dict(self):
+        return {
+            "user_id": self.user_id,
+            "full_name": self.full_name,
+            "test_results": {
+                code: {
+                    "score": result["score"],
+                    "date": result["date"].isoformat()
+                }
+                for code, result in self.test_results.items()
+            },
+            "registration_date": self.registration_date.isoformat()
+        }
 
-class OpenTest:
-    def __init__(self, code, creator_id, questions):
+    @classmethod
+    def from_dict(cls, data):
+        student = cls(data["user_id"], data["full_name"])
+        student.test_results = {
+            code: {
+                "score": result["score"],
+                "date": datetime.fromisoformat(result["date"])
+            }
+            for code, result in data["test_results"].items()
+        }
+        student.registration_date = datetime.fromisoformat(data["registration_date"])
+        return student
+
+class Test:
+    def __init__(self, code, creator_id, name="Test"):
         self.code = code
         self.creator_id = creator_id
-        self.questions = questions
-        self.attempts = {}  # user_id: {question: answer}
+        self.name = name
+        self.attempts = {}  # user_id: answer
+        self.date_created = datetime.now()
+        self.is_scored = False
+        self.max_score = 0
+
+    def to_dict(self):
+        return {
+            "code": self.code,
+            "creator_id": self.creator_id,
+            "name": self.name,
+            "attempts": self.attempts,
+            "date_created": self.date_created.strftime("%Y-%m-%d %H:%M:%S"),
+            "is_scored": self.is_scored,
+            "max_score": self.max_score
+        }
+
+    @classmethod
+    def from_dict(cls, data):
+        test = cls(data["code"], data["creator_id"], data.get("name", "Test"))
+        test.attempts = data["attempts"]
+        test.date_created = datetime.strptime(data["date_created"], "%Y-%m-%d %H:%M:%S")
+        test.is_scored = data.get("is_scored", False)
+        test.max_score = data.get("max_score", 0)
+        return test
+
+def save_data():
+    """Save all data to JSON files."""
+    try:
+        # Create data directory if it doesn't exist
+        if not os.path.exists('data'):
+            os.makedirs('data')
+            logger.info("Created data directory")
+
+        # Save tests
+        with open(TESTS_FILE, 'w', encoding='utf-8') as f:
+            test_data = {code: test.to_dict() for code, test in tests.items()}
+            json.dump(test_data, f, ensure_ascii=False, indent=2)
+            logger.info(f"Saved {len(test_data)} tests to {TESTS_FILE}")
+        
+        # Save students
+        with open(STUDENTS_FILE, 'w', encoding='utf-8') as f:
+            student_data = {str(user_id): student.to_dict() for user_id, student in students.items()}
+            json.dump(student_data, f, ensure_ascii=False, indent=2)
+            logger.info(f"Saved {len(student_data)} students to {STUDENTS_FILE}")
+
+        logger.info("All data saved successfully")
+    except Exception as e:
+        logger.error(f"Error saving data: {e}")
+        raise e  # Re-raise the exception to ensure it's not silently ignored
+
+def load_data():
+    """Load all data from JSON files."""
+    global tests, students
+    
+    try:
+        # Create data directory if it doesn't exist
+        if not os.path.exists('data'):
+            os.makedirs('data')
+            logger.info("Created data directory")
+        
+        # Load tests
+        if os.path.exists(TESTS_FILE):
+            with open(TESTS_FILE, 'r', encoding='utf-8') as f:
+                tests_data = json.load(f)
+                tests = {code: Test.from_dict(data) for code, data in tests_data.items()}
+                logger.info(f"Loaded {len(tests)} tests from {TESTS_FILE}")
+        
+        # Load students
+        if os.path.exists(STUDENTS_FILE):
+            with open(STUDENTS_FILE, 'r', encoding='utf-8') as f:
+                students_data = json.load(f)
+                students = {int(user_id): Student.from_dict(data) for user_id, data in students_data.items()}
+                logger.info(f"Loaded {len(students)} students from {STUDENTS_FILE}")
+
+        logger.info("All data loaded successfully")
+    except Exception as e:
+        logger.error(f"Error loading data: {e}")
+        raise e  # Re-raise the exception to ensure it's not silently ignored
 
 async def setup_commands(application: Application):
     """Setup bot commands that appear in the menu."""
@@ -59,28 +162,30 @@ async def setup_commands(application: Application):
         BotCommand("edit", "Ismni o'zgartirish"),
     ]
     
-    # Set commands for all users
-    await application.bot.set_my_commands(common_commands)
-    
     # Additional commands for admins
     admin_commands = [
         BotCommand("start", "Botni ishga tushirish"),
         BotCommand("testlarim", "Testlaringiz haqida ma'lumotlar"),
-        BotCommand("students", "O'quvchilar ro'yxati (admin)"),
-        BotCommand("scores", "Barcha natijalar (admin)"),
+        BotCommand("students", "O'quvchilar ro'yxati"),
+        BotCommand("scores", "Barcha natijalar"),
         BotCommand("info", "Bot haqida ma'lumot"),
-        BotCommand("edit", "Ismni o'zgartirish"),
     ]
     
-    # Set admin commands for the primary admin only
-    chat_scope = BotCommandScope.CHAT
     try:
-        await application.bot.set_my_commands(
-            admin_commands,
-            scope={"type": chat_scope, "chat_id": ADMIN_IDS[0]}
-        )
-    except Exception:
-        pass  # Ignore if setting commands fails for the admin
+        # Set commands for all users
+        await application.bot.set_my_commands(common_commands)
+        
+        # Set admin commands for each admin
+        for admin_id in ADMIN_IDS:
+            try:
+                await application.bot.set_my_commands(
+                    admin_commands,
+                    scope=BotCommandScope.CHAT(chat_id=admin_id)
+                )
+            except Exception as e:
+                logger.error(f"Failed to set admin commands for {admin_id}: {e}")
+    except Exception as e:
+        logger.error(f"Failed to set commands: {e}")
 
 async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send info about the bot when /info is issued."""
@@ -102,30 +207,21 @@ async def testlarim_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_tests = [code for code, test in tests.items() if test.creator_id in ADMIN_IDS]
-    user_open_tests = [code for code, test in open_tests.items() if test.creator_id in ADMIN_IDS]
     
-    if not user_tests and not user_open_tests:
+    if not user_tests:
         await update.message.reply_text("❌ Siz hali test yaratmagansiz!")
         return
 
     response = "📚 Sizning testlaringiz:\n\n"
     if user_tests:
-        response += "📝 Oddiy testlar:\n"
+        response += "📝 Testlar:\n"
         for code in user_tests:
             test = tests[code]
             response += f"📌 Test kodi: {code}\n"
+            response += f"📋 Test nomi: {test.name if hasattr(test, 'name') else 'Test'}\n"
             response += f"✅ Javoblar soni: {len(test.attempts)} ta\n"
-            response += f"📊 Ball: {test.max_score if test.is_scored else 'Oddiy'}\n"
+            response += f"🔑 To'g'ri javoblar: {test.code.upper()}\n"
             response += f"📅 Sana: {test.date_created.strftime('%Y-%m-%d %H:%M')}\n"
-            response += "➖➖➖➖➖➖➖➖➖➖\n"
-    
-    if user_open_tests:
-        response += "\n📖 Ochiq testlar:\n"
-        for code in user_open_tests:
-            test = open_tests[code]
-            response += f"📌 Test kodi: {code}\n"
-            response += f"❓ Savollar soni: {len(test.questions)} ta\n"
-            response += f"✅ Javoblar soni: {len(test.attempts)} ta\n"
             response += "➖➖➖➖➖➖➖➖➖➖\n"
     
     await update.message.reply_text(response)
@@ -133,6 +229,12 @@ async def testlarim_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /edit command."""
     user_id = update.effective_user.id
+    
+    # Don't allow admins to edit their names
+    if user_id in ADMIN_IDS:
+        await update.message.reply_text("❌ Administrator ismini o'zgartira olmaydi!")
+        return
+        
     if user_id not in students:
         await update.message.reply_text("❌ Siz ro'yxatdan o'tmagansiz!")
         return
@@ -196,23 +298,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user_id in ADMIN_IDS:
         if query.data == "create_test":
-            keyboard = [
-                [InlineKeyboardButton("❌ Nechta topgani berilishi❌", callback_data="score_info")],
-                [InlineKeyboardButton("📊 Ball qo'shish📊", callback_data="add_score")],
-                [InlineKeyboardButton("📚 Test turlari haqida", callback_data="test_types")],
-                [InlineKeyboardButton("📝 Test ma'lumoti📝", callback_data="test_info")],
-                [InlineKeyboardButton("📋 Test ma'lumoti(saytdagi jadval)📋", callback_data="test_table")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
             await query.message.reply_text(
                 "❗️Yangi test yaratish\n\n"
                 "✅Test nomini kiritib + (plus) belgisini qo'yasiz va barcha kalitni kiritasiz.\n\n"
                 "✍️Misol uchun:\n"
                 "Yangitest+abcdabcdabcd...  yoki\n"
                 "Yangitest+1a2b3c4d5a6b7c...\n\n"
-                "✅Katta(A) va kichik(a) harflar bir xil hisoblanadi.",
-                reply_markup=reply_markup
+                "✅Katta(A) va kichik(a) harflar bir xil hisoblanadi."
             )
         elif query.data == "check_test":
             await query.message.reply_text(
@@ -223,36 +315,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "123*1a2b3c4d5a6b7c...\n\n"
                 "⁉️Testga faqat bir marta javob berish mumkin.\n\n"
                 "✅Katta(A) va kichik(a) harflar bir xil hisoblanadi."
-            )
-        elif query.data == "test_types":
-            await query.message.reply_text(
-                "Test turlari:\n"
-                "1. Oddiy test - javoblar kalit bilan tekshiriladi\n"
-                "2. Ochiq test - savollarga erkin javob beriladi\n"
-                "3. Balli test - har bir to'g'ri javob uchun ball beriladi"
-            )
-        elif query.data == "score_info":
-            await query.message.reply_text(
-                "❌ Nechta topgani berilishi❌\n\n"
-                "Test yaratuvchisi test natijalarini ko'rishi mumkin"
-            )
-        elif query.data == "add_score":
-            await query.message.reply_text(
-                "📊 Ball qo'shish uchun:\n"
-                "score:test_kodi:maksimal_ball\n"
-                "Misol: score:123:100"
-            )
-        elif query.data == "test_info":
-            await query.message.reply_text(
-                "📝 Test ma'lumoti\n\n"
-                "Test yaratish uchun:\n"
-                "test_nomi+javoblar\n"
-                "Misol: 5-sinf+abcdabcd"
-            )
-        elif query.data == "test_table":
-            await query.message.reply_text(
-                "📋 Test ma'lumoti (saytdagi jadval)\n\n"
-                "Saytda test natijalarini jadval ko'rinishida ko'rish mumkin"
             )
     else:
         if query.data == "check_test":
@@ -324,9 +386,15 @@ async def scores_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for test_code, results in test_results.items():
         has_results = True
         test = tests.get(test_code)
-        max_score = test.max_score if test and test.is_scored else 100
+        if not test:
+            continue
+            
+        max_score = test.max_score if test.is_scored else 100
+        correct_key = test.code.lower()  # Get correct answers
         
         response += f"📝 Test #{test_code} natijalari:\n"
+        response += f"✅ To'g'ri javoblar: {correct_key}\n\n"
+        
         # Sort results by score in descending order
         sorted_results = sorted(results, key=lambda x: x["score"], reverse=True)
         
@@ -334,15 +402,33 @@ async def scores_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             student = result["student"]
             score = result["score"]
             date = result["date"]
-            response += f"{idx}. {student.full_name}: {score:.1f}/{max_score} ball"
-            response += f" ({date.strftime('%Y-%m-%d %H:%M')})\n"
-        response += "➖➖➖➖➖➖➖➖➖➖\n\n"
+            student_answer = test.attempts.get(student.user_id, "").lower()
+            
+            response += f"{idx}. {student.full_name}:\n"
+            response += f"📊 Ball: {score:.1f}/{max_score}\n"
+            response += f"📅 Sana: {date.strftime('%Y-%m-%d %H:%M')}\n"
+            
+            # Show detailed answer feedback
+            if student_answer:
+                response += "📝 Javoblar tahlili:\n"
+                for i, (user_ans, correct_ans) in enumerate(zip(student_answer, correct_key), 1):
+                    if user_ans == correct_ans:
+                        response += f"{i}) ✅ {user_ans.upper()}\n"
+                    else:
+                        response += f"{i}) ❌ {user_ans.upper()} → {correct_ans.upper()}\n"
+            response += "➖➖➖➖➖➖➖➖➖➖\n\n"
     
     if not has_results:
         await update.message.reply_text("Hozircha test natijalari mavjud emas!")
         return
 
-    await update.message.reply_text(response)
+    # Split long messages if needed
+    if len(response) > 4096:
+        parts = [response[i:i+4096] for i in range(0, len(response), 4096)]
+        for part in parts:
+            await update.message.reply_text(part)
+    else:
+        await update.message.reply_text(response)
 
 def validate_name(name: str) -> tuple[bool, str]:
     """Validate the name format."""
@@ -403,6 +489,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Create new student and store in database
         new_student = Student(user_id, result)
         students[user_id] = new_student
+        save_data()  # Save after registration
         
         # Update user's profile name in Telegram
         try:
@@ -453,6 +540,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id in students:
             old_name = students[user_id].full_name
             students[user_id].full_name = result
+            save_data()  # Save after name change
             await update.message.reply_text(f"✅ Ismingiz muvaffaqiyatli o'zgartirildi!\n\n{old_name} ➡️ {result}")
         else:
             await update.message.reply_text("❌ Siz ro'yxatdan o'tmagansiz!")
@@ -509,6 +597,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     feedback += f"💯 Foiz: {percentage:.1f}%"
 
                 test.attempts[user_id] = answer
+                save_data()  # Save after test submission
                 await update.message.reply_text(feedback)
 
             except ValueError:
@@ -535,12 +624,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    # Admin functionality remains unchanged
-    # Handle name editing
+    # Admin functionality
     if message.startswith("name:"):
         new_name = message[5:].strip()
         if new_name:
             user_names[user_id] = new_name
+            save_data()  # Save after name change
             await update.message.reply_text(
                 f"✅ Ismingiz muvaffaqiyatli o'zgartirildi: {new_name}"
             )
@@ -556,6 +645,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if test.creator_id in ADMIN_IDS:
                     test.is_scored = True
                     test.max_score = max_score
+                    save_data()  # Save after test score update
                     await update.message.reply_text(
                         f"✅ Test {max_score} ballik qilib o'zgartirildi"
                     )
@@ -569,52 +659,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Noto'g'ri format!")
         return
 
-    # Handle open test creation
-    if message.startswith("open+"):
-        try:
-            test_name, *questions = message[5:].strip().split("\n")
-            if questions:
-                test_code = f"O{len(open_tests) + 1:03d}"
-                open_tests[test_code] = OpenTest(test_code, user_id, questions)
-                await update.message.reply_text(
-                    f"✅ Ochiq test yaratildi!\n"
-                    f"Test kodi: {test_code}\n"
-                    f"Savollar soni: {len(questions)}"
-                )
-            else:
-                await update.message.reply_text("❌ Savollar kiritilmagan!")
-        except Exception:
-            await update.message.reply_text("❌ Noto'g'ri format!")
-        return
-
-    # Handle open test answers
-    if message.startswith("answer:"):
-        try:
-            test_code = message[7:].split("\n")[0].strip()
-            answers = message[7:].split("\n")[1:]
-            
-            if test_code in open_tests:
-                test = open_tests[test_code]
-                if user_id in test.attempts:
-                    await update.message.reply_text("❌ Siz bu testga allaqachon javob bergansiz!")
-                    return
-                
-                if len(answers) != len(test.questions):
-                    await update.message.reply_text("❌ Javoblar soni savollar soniga teng emas!")
-                    return
-                
-                test.attempts[user_id] = dict(zip(test.questions, answers))
-                await update.message.reply_text("✅ Javoblaringiz qabul qilindi!")
-            else:
-                await update.message.reply_text("❌ Bunday test mavjud emas!")
-        except Exception:
-            await update.message.reply_text("❌ Noto'g'ri format!")
-        return
-
     # Handle regular test creation
     if "+" in message:
         try:
             test_name, test_key = message.split("+", 1)
+            test_name = test_name.strip()
             test_key = test_key.strip().lower()
             
             if not re.match("^[a-zA-Z0-9]+$", test_key):
@@ -629,12 +678,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             test_code = f"{len(tests) + 1:03d}"
-            tests[test_code] = Test(test_key, user_id)
+            tests[test_code] = Test(test_key, user_id, test_name)
+            save_data()  # Save after test creation
 
             await update.message.reply_text(
                 f"✅ Test muvaffaqiyatli yaratildi!\n"
-                f"Test kodi: {test_code}\n"
-                f"Uzunlik: {len(test_key)} ta belgi"
+                f"📋 Test nomi: {test_name}\n"
+                f"📌 Test kodi: {test_code}\n"
+                f"🔑 Javoblar: {test_key.upper()}\n"
+                f"📏 Uzunlik: {len(test_key)} ta belgi"
             )
         except Exception:
             await update.message.reply_text(
@@ -645,11 +697,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Yangitest+1a2b3c4d5a6b7c...\n\n"
                 "✅Katta(A) va kichik(a) harflar bir xil hisoblanadi."
             )
-            return
 
 def main():
     """Start the bot."""
     try:
+        # Load saved data
+        load_data()
+        
         # Create the Application and pass it your bot's token
         application = Application.builder().token(token).build()
 
@@ -663,11 +717,17 @@ def main():
         application.add_handler(CallbackQueryHandler(button_callback))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-        # Setup commands
+        # Start the bot
         application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
     except Exception as e:
         logger.error(f"Error running bot: {e}")
         raise e
+    finally:
+        # Save data before shutting down
+        save_data()
 
 if __name__ == "__main__":
+    # Set up event loop policy for Windows
+    if os.name == 'nt':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     main() 
